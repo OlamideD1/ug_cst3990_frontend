@@ -1,0 +1,1032 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EduQuest - Gamified Learning Platform</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/vue-router@4/dist/vue-router.global.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <div class="app-container">
+            <nav class="navbar" v-if="isAuthenticated && authChecked">
+                <div class="navbar-content">
+                    <router-link to="/dashboard" class="logo">
+                        <i class="fas fa-graduation-cap"></i> EduQuest
+                    </router-link>
+                    <ul class="nav-links">
+                        <li><router-link to="/dashboard">Dashboard</router-link></li>
+                        <li><router-link to="/courses">Courses</router-link></li>
+                        <li><router-link to="/leaderboard">Leaderboard</router-link></li>
+                        <li><router-link to="/profile">Profile</router-link></li>
+                    </ul>
+                    <div class="user-info">
+                        <div class="points-display" v-if="user">
+                            <i class="fas fa-star"></i> {{ user.gamification?.totalPoints || 0 }} Points
+                        </div>
+                        <button @click="logout" class="logout-btn">
+                            <i class="fas fa-sign-out-alt"></i> Logout
+                        </button>
+                    </div>
+                </div>
+            </nav>
+
+            <main class="main-content">
+                <router-view></router-view>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        const { createApp } = Vue;
+        const { createRouter, createWebHashHistory } = VueRouter;
+
+        // API configuration
+        const API_BASE_URL = 'http://localhost:5000/api';
+        
+        // Set up axios defaults
+        axios.defaults.baseURL = API_BASE_URL;
+
+        // API service
+        const api = {
+            // Auth
+            login: (credentials) => axios.post('/auth/login', credentials),
+            register: (userData) => axios.post('/auth/register', userData),
+            
+            // User
+            getProfile: () => axios.get('/users/profile'),
+            updateProfile: (data) => axios.put('/users/profile', data),
+            
+            // Courses
+            getCourses: (params) => axios.get('/courses', { params }),
+            getCourse: (id) => axios.get(`/courses/${id}`),
+            enrollCourse: (id) => axios.post(`/courses/${id}/enroll`),
+            
+            // Progress
+            getProgress: (courseId) => axios.get(`/progress/${courseId}`),
+            completeModule: (courseId, moduleIndex) => axios.post(`/progress/${courseId}/module/${moduleIndex}`),
+            submitQuiz: (courseId, quizData) => axios.post(`/progress/${courseId}/quiz`, quizData),
+            
+            // Gamification
+            getLeaderboard: () => axios.get('/leaderboard'),
+            getBadges: () => axios.get('/badges'),
+            
+            // Analytics
+            getDashboard: () => axios.get('/analytics/dashboard')
+        };
+
+        // Store
+        const store = Vue.reactive({
+            user: null,
+            token: localStorage.getItem('token'),
+            isAuthenticated: false,
+            courses: [],
+            leaderboard: [],
+            dashboard: null,
+            loading: false,
+            error: null,
+            authChecked: false  // Track if authentication has been verified
+        });
+
+        // Auth guard
+        const authGuard = async (to, from, next) => {
+            // Wait for authentication check to complete
+            if (!store.authChecked) {
+                // Wait a bit for the auth check to complete
+                await new Promise(resolve => {
+                    const checkAuth = () => {
+                        if (store.authChecked) {
+                            resolve();
+                        } else {
+                            setTimeout(checkAuth, 50);
+                        }
+                    };
+                    checkAuth();
+                });
+            }
+            
+            if (store.isAuthenticated) {
+                next();
+            } else {
+                next('/login');
+            }
+        };
+
+        // Function to check authentication
+        const checkAuthentication = async () => {
+            if (store.token) {
+                axios.defaults.headers.common['Authorization'] = `Bearer ${store.token}`;
+                
+                try {
+                    const response = await api.getProfile();
+                    store.user = response.data;
+                    
+                    // Ensure user has required arrays initialized
+                    if (!store.user.enrolledCourses) {
+                        store.user.enrolledCourses = [];
+                    }
+                    if (!store.user.completedCourses) {
+                        store.user.completedCourses = [];
+                    }
+                    if (!store.user.gamification) {
+                        store.user.gamification = {
+                            totalPoints: 0,
+                            level: 1,
+                            badges: [],
+                            streakDays: 0
+                        };
+                    }
+                    
+                    store.isAuthenticated = true;
+                } catch (error) {
+                    console.error('Token validation failed:', error);
+                    // Clear invalid token
+                    localStorage.removeItem('token');
+                    delete axios.defaults.headers.common['Authorization'];
+                    store.token = null;
+                    store.user = null;
+                    store.isAuthenticated = false;
+                }
+            }
+            store.authChecked = true;
+        };
+
+        // Loading component for authentication check
+        const AuthLoadingComponent = {
+            template: `
+                <div class="auth-container">
+                    <div class="auth-card">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            <p>Loading...</p>
+                        </div>
+                    </div>
+                </div>
+            `
+        };
+
+        // Components
+        const LoginComponent = {
+            template: `
+                <div class="auth-container">
+                    <div class="auth-card">
+                        <h2 class="auth-title">Welcome to EduQuest</h2>
+                        <div v-if="error" class="alert alert-error">{{ error }}</div>
+                        <form @submit.prevent="login">
+                            <div class="form-group">
+                                <label class="form-label">Email</label>
+                                <input type="email" v-model="form.email" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Password</label>
+                                <input type="password" v-model="form.password" class="form-control" required>
+                            </div>
+                            <button type="submit" class="btn" style="width: 100%;" :disabled="loading">
+                                <span v-if="loading">Logging in...</span>
+                                <span v-else>Login</span>
+                            </button>
+                        </form>
+                        <div class="auth-link">
+                            <p>Don't have an account? <router-link to="/register">Sign up</router-link></p>
+                        </div>
+                    </div>
+                </div>
+            `,
+            data() {
+                return {
+                    form: {
+                        email: '',
+                        password: ''
+                    },
+                    loading: false,
+                    error: null
+                };
+            },
+            methods: {
+                async login() {
+                    this.loading = true;
+                    this.error = null;
+                    
+                    try {
+                        const response = await api.login(this.form);
+                        const { token, user } = response.data;
+                        
+                        localStorage.setItem('token', token);
+                        axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+                        
+                        // Ensure user object has required properties
+                        if (!user.enrolledCourses) user.enrolledCourses = [];
+                        if (!user.completedCourses) user.completedCourses = [];
+                        if (!user.gamification) {
+                            user.gamification = {
+                                totalPoints: 0,
+                                level: 1,
+                                badges: [],
+                                streakDays: 0
+                            };
+                        }
+                        
+                        store.token = token;
+                        store.user = user;
+                        store.isAuthenticated = true;
+                        store.authChecked = true;
+                        
+                        this.$router.push('/dashboard');
+                    } catch (error) {
+                        this.error = error.response?.data?.error || 'Login failed';
+                    } finally {
+                        this.loading = false;
+                    }
+                }
+            }
+        };
+
+        const RegisterComponent = {
+            template: `
+                <div class="auth-container">
+                    <div class="auth-card">
+                        <h2 class="auth-title">Join EduQuest</h2>
+                        <div v-if="error" class="alert alert-error">{{ error }}</div>
+                        <form @submit.prevent="register">
+                            <div class="form-group">
+                                <label class="form-label">Username</label>
+                                <input type="text" v-model="form.username" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Email</label>
+                                <input type="email" v-model="form.email" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">First Name</label>
+                                <input type="text" v-model="form.firstName" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Last Name</label>
+                                <input type="text" v-model="form.lastName" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Password</label>
+                                <input type="password" v-model="form.password" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Role</label>
+                                <select v-model="form.role" class="form-control">
+                                    <option value="student">Student</option>
+                                    <option value="instructor">Instructor</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="btn" style="width: 100%;" :disabled="loading">
+                                <span v-if="loading">Creating account...</span>
+                                <span v-else">Create Account</span>
+                            </button>
+                        </form>
+                        <div class="auth-link">
+                            <p>Already have an account? <router-link to="/login">Sign in</router-link></p>
+                        </div>
+                    </div>
+                </div>
+            `,
+            data() {
+                return {
+                    form: {
+                        username: '',
+                        email: '',
+                        firstName: '',
+                        lastName: '',
+                        password: '',
+                        role: 'student'
+                    },
+                    loading: false,
+                    error: null
+                };
+            },
+            methods: {
+                async register() {
+                    this.loading = true;
+                    this.error = null;
+                    
+                    try {
+                        const response = await api.register(this.form);
+                        const { token, user } = response.data;
+                        
+                        localStorage.setItem('token', token);
+                        axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+                        
+                        // Ensure user object has required properties
+                        if (!user.enrolledCourses) user.enrolledCourses = [];
+                        if (!user.completedCourses) user.completedCourses = [];
+                        if (!user.gamification) {
+                            user.gamification = {
+                                totalPoints: 0,
+                                level: 1,
+                                badges: [],
+                                streakDays: 0
+                            };
+                        }
+                        
+                        store.token = token;
+                        store.user = user;
+                        store.isAuthenticated = true;
+                        store.authChecked = true;
+                        
+                        this.$router.push('/dashboard');
+                    } catch (error) {
+                        this.error = error.response?.data?.error || 'Registration failed';
+                    } finally {
+                        this.loading = false;
+                    }
+                }
+            }
+        };
+
+        const DashboardComponent = {
+            template: `
+                <div>
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">
+                                <i class="fas fa-tachometer-alt"></i> 
+                                Welcome back, {{ user?.firstName }}!
+                            </h2>
+                        </div>
+                        
+                        <div class="stats-grid" v-if="dashboard">
+                            <div class="stat-card">
+                                <div class="stat-value">{{ dashboard.user?.points || 0 }}</div>
+                                <div class="stat-label">Total Points</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value">{{ dashboard.user?.level || 1 }}</div>
+                                <div class="stat-label">Level</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value">{{ dashboard.user?.badges || 0 }}</div>
+                                <div class="stat-label">Badges Earned</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value">{{ dashboard.user?.streak || 0 }}</div>
+                                <div class="stat-label">Day Streak</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-2">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title">Course Progress</h3>
+                            </div>
+                            <div v-if="dashboard">
+                                <div class="stat-card">
+                                    <div class="stat-value">{{ dashboard.courses?.enrolled || 0 }}</div>
+                                    <div class="stat-label">Enrolled Courses</div>
+                                </div>
+                                <div class="stat-card">
+                                    <div class="stat-value">{{ dashboard.courses?.completed || 0 }}</div>
+                                    <div class="stat-label">Completed Courses</div>
+                                </div>
+                                <div class="stat-card">
+                                    <div class="stat-value">{{ dashboard.courses?.averageProgress || 0 }}%</div>
+                                    <div class="stat-label">Average Progress</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title">Quick Actions</h3>
+                            </div>
+                            <div class="grid">
+                                <router-link to="/courses" class="btn">
+                                    <i class="fas fa-book"></i> Browse Courses
+                                </router-link>
+                                <router-link to="/leaderboard" class="btn">
+                                    <i class="fas fa-trophy"></i> View Leaderboard
+                                </router-link>
+                                <router-link to="/profile" class="btn">
+                                    <i class="fas fa-user"></i> Edit Profile
+                                </router-link>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            data() {
+                return {
+                    dashboard: null
+                };
+            },
+            computed: {
+                user() {
+                    return store.user;
+                }
+            },
+            async mounted() {
+                try {
+                    const response = await api.getDashboard();
+                    this.dashboard = response.data;
+                } catch (error) {
+                    console.error('Failed to load dashboard:', error);
+                }
+            }
+        };
+
+        const CoursesComponent = {
+            template: `
+                <div>
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">Available Courses</h2>
+                        </div>
+                        
+                        <div class="form-group">
+                            <input type="text" v-model="searchQuery" placeholder="Search courses..." class="form-control">
+                        </div>
+                        
+                        <div class="grid grid-3" v-if="filteredCourses.length">
+                            <div v-for="course in filteredCourses" :key="course._id" class="course-card">
+                                <div class="course-thumbnail">
+                                    <i class="fas fa-book"></i>
+                                </div>
+                                <div class="course-content">
+                                    <h3 class="course-title">{{ course.title }}</h3>
+                                    <p class="course-description">{{ course.description }}</p>
+                                    <div class="course-meta">
+                                        <span class="course-difficulty" :class="'difficulty-' + course.difficulty">
+                                            {{ course.difficulty }}
+                                        </span>
+                                        <span class="course-duration">{{ course.duration }}h</span>
+                                    </div>
+                                    <div class="course-actions">
+                                        <router-link :to="'/courses/' + course._id" class="btn">
+                                            View Course
+                                        </router-link>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div v-else-if="!loading" class="alert alert-info">
+                            No courses found.
+                        </div>
+                        
+                        <div v-if="loading" class="loading">
+                            <div class="spinner"></div>
+                            <p>Loading courses...</p>
+                        </div>
+                    </div>
+                </div>
+            `,
+            data() {
+                return {
+                    courses: [],
+                    searchQuery: '',
+                    loading: false
+                };
+            },
+            computed: {
+                filteredCourses() {
+                    if (!this.searchQuery) {
+                        return this.courses;
+                    }
+                    return this.courses.filter(course =>
+                        course.title.toLowerCase().includes(this.searchQuery.toLowerCase()) ||
+                        course.description.toLowerCase().includes(this.searchQuery.toLowerCase())
+                    );
+                }
+            },
+            async mounted() {
+                this.loading = true;
+                try {
+                    const response = await api.getCourses();
+                    this.courses = response.data;
+                } catch (error) {
+                    console.error('Failed to load courses:', error);
+                } finally {
+                    this.loading = false;
+                }
+            }
+        };
+
+        const CourseDetailComponent = {
+            template: `
+                <div v-if="course">
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">{{ course.title }}</h2>
+                            <button v-if="!isEnrolled" @click="enroll" class="btn" :disabled="enrolling">
+                                <span v-if="enrolling">Enrolling...</span>
+                                <span v-else>Enroll Now</span>
+                            </button>
+                        </div>
+                        
+                        <p>{{ course.description }}</p>
+                        
+                        <div class="course-meta">
+                            <span class="course-difficulty" :class="'difficulty-' + course.difficulty">
+                                {{ course.difficulty }}
+                            </span>
+                            <span>Duration: {{ course.duration }} hours</span>
+                            <span>Instructor: {{ course.instructor.firstName }} {{ course.instructor.lastName }}</span>
+                        </div>
+                        
+                        <div v-if="progress" class="progress-section">
+                            <h3>Your Progress</h3>
+                            <div class="progress-bar">
+                                <div class="progress-fill" :style="{ width: progress.overallProgress + '%' }"></div>
+                            </div>
+                            <p>{{ progress.overallProgress }}% Complete</p>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3 class="card-title">Course Modules</h3>
+                        </div>
+                        
+                        <ul class="module-list">
+                            <li v-for="(module, index) in course.modules" :key="index" 
+                                class="module-item" 
+                                :class="{ completed: isModuleCompleted(index) }"
+                                @click="openModule(index)">
+                                <div class="module-icon">
+                                    <i v-if="isModuleCompleted(index)" class="fas fa-check-circle" style="color: #28a745;"></i>
+                                    <i v-else class="fas fa-play-circle" style="color: #667eea;"></i>
+                                </div>
+                                <div class="module-info">
+                                    <div class="module-title">{{ module.title }}</div>
+                                    <div class="module-description">{{ module.description }}</div>
+                                </div>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <!-- Module Modal -->
+                    <div v-if="selectedModule" class="card">
+                        <div class="card-header">
+                            <h3 class="card-title">{{ selectedModule.title }}</h3>
+                            <button @click="closeModule" class="btn btn-secondary">Close</button>
+                        </div>
+                        
+                        <div class="module-content">
+                            <p>{{ selectedModule.description }}</p>
+                            <div v-if="selectedModule.content" v-html="selectedModule.content"></div>
+                            
+                            <div v-if="selectedModule.videoUrl" class="video-container">
+                                <video controls width="100%">
+                                    <source :src="selectedModule.videoUrl" type="video/mp4">
+                                </video>
+                            </div>
+                            
+                            <div v-if="selectedModule.quizzes && selectedModule.quizzes.length" class="quiz-section">
+                                <h4 id="quiz">Quiz</h4>
+                                <div v-for="(quiz, quizIndex) in selectedModule.quizzes" :key="quizIndex" class="quiz-container">
+                                    <div class="quiz-question">{{ quiz.question }}</div>
+                                    <div class="quiz-options">
+                                        <div v-for="(option, optionIndex) in quiz.options" :key="optionIndex"
+                                             class="quiz-option"
+                                             :class="{ selected: selectedAnswers[quizIndex] === optionIndex }"
+                                             @click="selectAnswer(quizIndex, optionIndex)">
+                                            {{ option }}
+                                        </div>
+                                    </div>
+                                </div>
+                                <button @click="submitQuiz" class="btn" :disabled="!canSubmitQuiz">
+                                    Submit Quiz
+                                </button>
+                            </div>
+                            
+                            <div class="module-actions">
+                                <button @click="completeModule" class="btn" :disabled="isModuleCompleted(selectedModuleIndex)">
+                                    <span v-if="isModuleCompleted(selectedModuleIndex)">Completed</span>
+                                    <span v-else>Mark as Complete</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div v-else class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading course...</p>
+                </div>
+            `,
+            data() {
+                return {
+                    course: null,
+                    progress: null,
+                    selectedModule: null,
+                    selectedModuleIndex: null,
+                    selectedAnswers: {},
+                    isEnrolled: false,
+                    enrolling: false
+                };
+            },
+            computed: {
+                canSubmitQuiz() {
+                    if (!this.selectedModule || !this.selectedModule.quizzes) return false;
+                    return this.selectedModule.quizzes.every((quiz, index) => 
+                        this.selectedAnswers[index] !== undefined
+                    );
+                }
+            },
+            methods: {
+                async enroll() {
+                    this.enrolling = true;
+                    try {
+                        await api.enrollCourse(this.$route.params.id);
+                        this.isEnrolled = true;
+                        
+                        // Update user's enrolled courses in store
+                        if (store.user) {
+                            if (!store.user.enrolledCourses) {
+                                store.user.enrolledCourses = [];
+                            }
+                            if (!store.user.enrolledCourses.includes(this.course._id)) {
+                                store.user.enrolledCourses.push(this.course._id);
+                            }
+                        }
+                        
+                        await this.loadProgress();
+                        alert('Successfully enrolled in the course!');
+                    } catch (error) {
+                        console.error('Enrollment failed:', error);
+                        const errorMessage = error.response?.data?.error || 'Enrollment failed. Please try again.';
+                        
+                        if (errorMessage.includes('Already enrolled')) {
+                            alert('You are already enrolled in this course!');
+                            this.isEnrolled = true;
+                            await this.loadProgress();
+                        } else {
+                            alert(errorMessage);
+                        }
+                    } finally {
+                        this.enrolling = false;
+                    }
+                },
+                
+                async loadProgress() {
+                    try {
+                        const response = await api.getProgress(this.$route.params.id);
+                        this.progress = response.data;
+                    } catch (error) {
+                        console.error('Failed to load progress:', error);
+                    }
+                },
+                
+                isModuleCompleted(index) {
+                    return this.progress && this.progress.completedModules.includes(index);
+                },
+                
+                openModule(index) {
+                    if (!this.isEnrolled) {
+                        alert('Please enroll in the course first.');
+                        return;
+                    }
+                    this.selectedModule = this.course.modules[index];
+                    this.selectedModuleIndex = index;
+                    this.selectedAnswers = {};
+                },
+                
+                closeModule() {
+                    this.selectedModule = null;
+                    this.selectedModuleIndex = null;
+                    this.selectedAnswers = {};
+                },
+                
+                selectAnswer(quizIndex, optionIndex) {
+                    this.selectedAnswers[quizIndex] = optionIndex;
+                },
+                
+                async submitQuiz() {
+                    try {
+                        const quizzes = this.selectedModule.quizzes;
+                        let totalScore = 0;
+                        let maxScore = 0;
+                        
+                        quizzes.forEach((quiz, index) => {
+                            maxScore += quiz.points;
+                            if (this.selectedAnswers[index] === quiz.correctAnswer) {
+                                totalScore += quiz.points;
+                            }
+                        });
+                        
+                        await api.submitQuiz(this.$route.params.id, {
+                            moduleIndex: this.selectedModuleIndex,
+                            quizIndex: 0,
+                            score: totalScore,
+                            maxScore: maxScore
+                        });
+                        
+                        alert(`Quiz completed! Score: ${totalScore}/${maxScore}`);
+                        await this.loadProgress();
+                    } catch (error) {
+                        console.error('Quiz submission failed:', error);
+                    }
+                },
+                
+                async completeModule() {
+                    try {
+                        await api.completeModule(this.$route.params.id, this.selectedModuleIndex);
+                        await this.loadProgress();
+                        this.closeModule();
+                        alert('Module completed! Points awarded.');
+                    } catch (error) {
+                        console.error('Module completion failed:', error);
+                    }
+                }
+            },
+            async mounted() {
+                try {
+                    const response = await api.getCourse(this.$route.params.id);
+                    this.course = response.data;
+                    
+                    // Check if user is enrolled
+                    const user = store.user;
+                    this.isEnrolled = user.enrolledCourses.includes(this.course._id) || 
+                                     user.completedCourses.includes(this.course._id);
+                    
+                    if (this.isEnrolled) {
+                        await this.loadProgress();
+                    }
+                } catch (error) {
+                    console.error('Failed to load course:', error);
+                }
+            }
+        };
+
+        const LeaderboardComponent = {
+            template: `
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">
+                            <i class="fas fa-trophy"></i> Leaderboard
+                        </h2>
+                    </div>
+                    
+                    <div v-if="leaderboard.length" class="leaderboard">
+                        <div v-for="entry in leaderboard" :key="entry.user.id" class="leaderboard-item">
+                            <div class="rank">{{ entry.rank }}</div>
+                            <div class="user-name">{{ entry.user.firstName }} {{ entry.user.lastName }}</div>
+                            <div class="user-level">Level {{ entry.user.level }}</div>
+                            <div class="user-points">{{ entry.points }} pts</div>
+                        </div>
+                    </div>
+                    
+                    <div v-else-if="!loading" class="alert alert-info">
+                        No leaderboard data available.
+                    </div>
+                    
+                    <div v-if="loading" class="loading">
+                        <div class="spinner"></div>
+                        <p>Loading leaderboard...</p>
+                    </div>
+                </div>
+            `,
+            data() {
+                return {
+                    leaderboard: [],
+                    loading: false
+                };
+            },
+            async mounted() {
+                this.loading = true;
+                try {
+                    const response = await api.getLeaderboard();
+                    this.leaderboard = response.data;
+                } catch (error) {
+                    console.error('Failed to load leaderboard:', error);
+                } finally {
+                    this.loading = false;
+                }
+            }
+        };
+
+        const ProfileComponent = {
+            template: `
+                <div>
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">Profile</h2>
+                        </div>
+                        
+                        <div class="grid grid-2">
+                            <div>
+                                <h3>Personal Information</h3>
+                                <form @submit.prevent="updateProfile">
+                                    <div class="form-group">
+                                        <label class="form-label">First Name</label>
+                                        <input type="text" v-model="form.firstName" class="form-control" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Last Name</label>
+                                        <input type="text" v-model="form.lastName" class="form-control" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Bio</label>
+                                        <textarea v-model="form.profile.bio" class="form-control" rows="3"></textarea>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Learning Style</label>
+                                        <select v-model="form.profile.learningStyle" class="form-control">
+                                            <option value="visual">Visual</option>
+                                            <option value="auditory">Auditory</option>
+                                            <option value="kinesthetic">Kinesthetic</option>
+                                            <option value="reading">Reading/Writing</option>
+                                        </select>
+                                    </div>
+                                    <button type="submit" class="btn" :disabled="updating">
+                                        <span v-if="updating">Updating...</span>
+                                        <span v-else>Update Profile</span>
+                                    </button>
+                                </form>
+                            </div>
+                            
+                            <div>
+                                <h3>Gamification Stats</h3>
+                                <div class="stats-grid">
+                                    <div class="stat-card">
+                                        <div class="stat-value">{{ user?.gamification?.totalPoints || 0 }}</div>
+                                        <div class="stat-label">Total Points</div>
+                                    </div>
+                                    <div class="stat-card">
+                                        <div class="stat-value">{{ user?.gamification?.level || 1 }}</div>
+                                        <div class="stat-label">Level</div>
+                                    </div>
+                                    <div class="stat-card">
+                                        <div class="stat-value">{{ user?.gamification?.badges?.length || 0 }}</div>
+                                        <div class="stat-label">Badges</div>
+                                    </div>
+                                    <div class="stat-card">
+                                        <div class="stat-value">{{ user?.gamification?.streakDays || 0 }}</div>
+                                        <div class="stat-label">Day Streak</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="card" v-if="user?.gamification?.badges?.length">
+                        <div class="card-header">
+                            <h3 class="card-title">Your Badges</h3>
+                        </div>
+                        
+                        <div class="badges-grid">
+                            <div v-for="badge in user.gamification.badges" :key="badge.name" class="badge-card">
+                                <div class="badge-icon">{{ badge.icon }}</div>
+                                <div class="badge-name">{{ badge.name }}</div>
+                                <div class="badge-description">{{ badge.description }}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            data() {
+                return {
+                    form: {
+                        firstName: '',
+                        lastName: '',
+                        profile: {
+                            bio: '',
+                            learningStyle: 'visual'
+                        }
+                    },
+                    updating: false
+                };
+            },
+            computed: {
+                user() {
+                    return store.user;
+                }
+            },
+            methods: {
+                async updateProfile() {
+                    this.updating = true;
+                    try {
+                        const response = await api.updateProfile(this.form);
+                        store.user = response.data;
+                        alert('Profile updated successfully!');
+                    } catch (error) {
+                        console.error('Profile update failed:', error);
+                        alert('Failed to update profile');
+                    } finally {
+                        this.updating = false;
+                    }
+                }
+            },
+            mounted() {
+                if (this.user) {
+                    this.form.firstName = this.user.firstName || '';
+                    this.form.lastName = this.user.lastName || '';
+                    this.form.profile = {
+                        bio: this.user.profile?.bio || '',
+                        learningStyle: this.user.profile?.learningStyle || 'visual'
+                    };
+                }
+            }
+        };
+
+        // Routes
+        const routes = [
+            { path: '/loading', component: AuthLoadingComponent },
+            { path: '/login', component: LoginComponent },
+            { path: '/register', component: RegisterComponent },
+            { path: '/dashboard', component: DashboardComponent, beforeEnter: authGuard },
+            { path: '/courses', component: CoursesComponent, beforeEnter: authGuard },
+            { path: '/courses/:id', component: CourseDetailComponent, beforeEnter: authGuard },
+            { path: '/leaderboard', component: LeaderboardComponent, beforeEnter: authGuard },
+            { path: '/profile', component: ProfileComponent, beforeEnter: authGuard },
+            { 
+                path: '/', 
+                redirect: () => {
+                    if (store.authChecked) {
+                        return store.isAuthenticated ? '/dashboard' : '/login';
+                    } else {
+                        return '/loading';
+                    }
+                }
+            }
+        ];
+
+        const router = createRouter({
+            history: createWebHashHistory(),
+            routes
+        });
+
+        // Global navigation guard
+        router.beforeEach(async (to, from, next) => {
+            // If going to loading page, always allow
+            if (to.path === '/loading') {
+                next();
+                return;
+            }
+            
+            // Wait for auth check to complete
+            if (!store.authChecked) {
+                next('/loading');
+                return;
+            }
+            
+            // If trying to access auth pages while logged in, redirect to dashboard
+            if ((to.path === '/login' || to.path === '/register') && store.isAuthenticated) {
+                next('/dashboard');
+                return;
+            }
+            
+            next();
+        });
+
+        // App
+        const app = createApp({
+            data() {
+                return {
+                    store
+                };
+            },
+            computed: {
+                isAuthenticated() {
+                    return store.isAuthenticated;
+                },
+                user() {
+                    return store.user;
+                },
+                authChecked() {
+                    return store.authChecked;
+                }
+            },
+            methods: {
+                logout() {
+                    localStorage.removeItem('token');
+                    delete axios.defaults.headers.common['Authorization'];
+                    
+                    store.token = null;
+                    store.user = null;
+                    store.isAuthenticated = false;
+                    store.authChecked = true; // Keep auth as checked after logout
+                    
+                    this.$router.push('/login');
+                }
+            },
+            async mounted() {
+                // Check authentication on app startup
+                await checkAuthentication();
+                
+                // Redirect to appropriate page after auth check
+                if (this.$route.path === '/loading' || this.$route.path === '/') {
+                    if (store.isAuthenticated) {
+                        this.$router.push('/dashboard');
+                    } else {
+                        this.$router.push('/login');
+                    }
+                }
+            }
+        });
+
+        app.use(router);
+        app.mount('#app');
+    </script>
+</body>
+</html>
